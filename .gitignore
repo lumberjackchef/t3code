@@ -41,3 +41,5 @@ node_modules/
 # Local machine tooling + fork-only validation spike
 mise.toml
 scripts/hermes-acp-spike.mjs
+scripts/hermes-ui-*.mjs
+scripts/hermes-ui-e2e.mjs

@@ -699,3 +699,18 @@ export const PiAgentIcon: Icon = ({ className, ...props }) => (
     <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
   </svg>
 );
+
+/**
+ * Hermes Agent provider glyph.
+ * Fork-only brand mark for the local Hermes provider (a caduceus-like staff of
+ * Hermes/Mercury). Kept intentionally minimal so dark/light contrast relies on
+ * the CSS `currentColor` fill like the other simple glyphs in this file.
+ */
+export const HermesIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 24 24" className={cn("fill-current", className)} aria-hidden>
+    <path
+      fillRule="evenodd"
+      d="M10.5 2.25a1 1 0 0 1 1.8-.6l1.6 2.15 3.42 2.14c.75.47 1.18 1.3 1.18 2.18V9a1 1 0 0 1-.5.87l-2.6 1.5v8.38c0 .83-.34 1.62-.94 2.2a3.2 3.2 0 0 1-4.5 0 3.1 3.1 0 0 1-.94-2.2V13.6l-2.6-1.5A1 1 0 0 1 5 11.25v-1.45a1 1 0 0 1 .2-.6L6 8.4V6.24a1 1 0 0 1 .5-.87l3.42-2.14 1.05-1.32a1 1 0 0 1 .53.34ZM11.5 8.28l-3.5 2.02v.51l2.6 1.5c.42.24.9.24 1.32 0l2.58-1.49v-.52l-3.44-2.15a.3.3 0 0 0-.13-.04.17.17 0 0 0-.1.03.5.5 0 0 0-.4-.2.56.56 0 0 0-.41.16.3.3 0 0 0-.04.24h.14l-.33.06c-.08.02-.17.04-.26.05Zm-1.5-.87h.64c.07-.7.47-1.03.86-1.03s.79.33.86 1.03h.64a1.4 1.4 0 0 0-.23-.77l2.5-1.56-1.6-1.35-1.62 1.3a2.7 2.7 0 0 0-2.55 0l-1.62-1.3-1.6 1.35 2.5 1.56a1.4 1.4 0 0 0-.23.77Z"
+    />
+  </svg>
+);
