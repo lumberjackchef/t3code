@@ -95,7 +95,9 @@ export const makeHermesAcpRuntime = (
 
 export function resolveHermesAcpBaseModelId(model: string | null | undefined): string {
   const base = model?.trim();
-  return base && base.length > 0 ? normalizeModelSlug(base, HERMES_DRIVER_KIND) ?? base : "hermes";
+  return base && base.length > 0
+    ? (normalizeModelSlug(base, HERMES_DRIVER_KIND) ?? base)
+    : "hermes";
 }
 
 export function currentHermesModelIdFromSessionSetup(
@@ -113,12 +115,20 @@ export function applyHermesAcpModelSelection<E>(input: {
   readonly requestedModelId: string | undefined;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<string | undefined, E> {
-  const shouldSwitchModel =
-    input.requestedModelId !== undefined && input.requestedModelId !== input.currentModelId;
+  const requested = input.requestedModelId?.trim();
+  // Hermes is a local agent that owns its own model at run time. The T3-level
+  // model picker exposes a cosmetic `hermes` sentinel slug; issuing a
+  // `session/set_model` for it makes Hermes reject it (401 "Model hermes is
+  // not supported"). Treat the sentinel (and any explicit override to it) as
+  // "keep Hermes' own current model" and never force a session model switch.
+  if (requested === undefined || requested === "hermes") {
+    return Effect.succeed(input.currentModelId);
+  }
+  const shouldSwitchModel = requested !== input.currentModelId;
   if (!shouldSwitchModel) {
     return Effect.succeed(input.currentModelId);
   }
   return input.runtime
-    .setSessionModel(input.requestedModelId)
+    .setSessionModel(requested)
     .pipe(Effect.mapError(input.mapError), Effect.as(input.requestedModelId));
 }
