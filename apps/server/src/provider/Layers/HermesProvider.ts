@@ -32,7 +32,13 @@ const HERMES_PRESENTATION = {
   displayName: "Hermes",
   badgeLabel: "Early Access",
   showInteractionModeToggle: false,
-  requiresNewThreadForModelChange: true,
+  // The model picker's `hermes` entry is cosmetic: Hermes ACP owns its own
+  // runtime model and `applyHermesAcpModelSelection` never forces a session
+  // switch. T3's command reactor blocks a model change mid-thread when the
+  // provider declares requiresNewThreadForModelChange (see ProviderCommandReactor),
+  // which would wrongly reject continuing an agent-started question. Declare
+  // false so a thread can run turns regardless of the picker selection.
+  requiresNewThreadForModelChange: false,
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
