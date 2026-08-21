@@ -4,12 +4,10 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import type * as EffectAcpSchema from "effect-acp/schema";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { HttpClient } from "effect/unstable/http";
@@ -29,10 +27,6 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import {
-  makeHermesAcpRuntime,
-  resolveHermesAcpBaseModelId,
-} from "../acp/HermesAcpSupport.ts";
 
 const HERMES_PRESENTATION = {
   displayName: "Hermes",
@@ -45,7 +39,6 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-const HERMES_ACP_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 
 const HERMES_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
@@ -87,9 +80,9 @@ export function buildInitialHermesProviderSnapshot(
       probe: {
         installed: true,
         version: null,
-        status: "warning",
+        status: "ready",
         auth: { status: "unknown" },
-        message: "Checking Hermes CLI availability...",
+        message: "Hermes Agent is a local ACP provider.",
       },
     });
   });
@@ -101,47 +94,6 @@ function hermesModelsFromSettings(
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
 }
-
-function buildHermesDiscoveredModelsFromSessionModelState(
-  modelState: EffectAcpSchema.SessionModelState | null | undefined,
-): ReadonlyArray<ServerProviderModel> {
-  if (!modelState || modelState.availableModels.length === 0) {
-    return [];
-  }
-  const seen = new Set<string>();
-  return modelState.availableModels
-    .map((model): ServerProviderModel | undefined => {
-      const slug = resolveHermesAcpBaseModelId(model.modelId);
-      if (!slug || seen.has(slug)) {
-        return undefined;
-      }
-      seen.add(slug);
-      return {
-        slug,
-        name: model.name.trim() || slug,
-        isCustom: false,
-        capabilities: EMPTY_CAPABILITIES,
-      };
-    })
-    .filter((model): model is ServerProviderModel => model !== undefined);
-}
-
-const discoverHermesModelsViaAcp = (
-  hermesSettings: HermesSettings,
-  environment: NodeJS.ProcessEnv = process.env,
-) =>
-  Effect.gen(function* () {
-    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const acp = yield* makeHermesAcpRuntime({
-      hermesSettings,
-      environment,
-      childProcessSpawner,
-      cwd: process.cwd(),
-      clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
-    });
-    const started = yield* acp.start();
-    return buildHermesDiscoveredModelsFromSessionModelState(started.sessionSetupResult.models);
-  }).pipe(Effect.scoped);
 
 const runHermesVersionCommand = (
   hermesSettings: HermesSettings,
@@ -254,51 +206,16 @@ export const checkHermesProviderStatus = Effect.fn("checkHermesProviderStatus")(
     });
   }
 
-  const discoveryExit = yield* discoverHermesModelsViaAcp(hermesSettings, environment).pipe(
-    Effect.timeoutOption(HERMES_ACP_MODEL_DISCOVERY_TIMEOUT_MS),
-    Effect.exit,
-  );
-  if (Exit.isFailure(discoveryExit)) {
-    yield* Effect.logWarning("Hermes ACP model discovery failed", {
-      errorTag: causeErrorTag(discoveryExit.cause),
-    });
-    return buildServerProvider({
-      presentation: HERMES_PRESENTATION,
-      enabled: hermesSettings.enabled,
-      checkedAt,
-      models: fallbackModels,
-      probe: {
-        installed: true,
-        version,
-        status: "error",
-        auth: { status: "unknown" },
-        message: "Hermes CLI is installed but ACP startup failed. Check server logs for details.",
-      },
-    });
-  }
-  if (Option.isNone(discoveryExit.value)) {
-    yield* Effect.logWarning(
-      `Hermes ACP model discovery timed out after ${HERMES_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`,
-    );
-    return buildServerProvider({
-      presentation: HERMES_PRESENTATION,
-      enabled: hermesSettings.enabled,
-      checkedAt,
-      models: fallbackModels,
-      probe: {
-        installed: true,
-        version,
-        status: "error",
-        auth: { status: "unknown" },
-        message: `Hermes CLI is installed but ACP startup timed out after ${HERMES_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`,
-      },
-    });
-  }
-  const discoveredModels = discoveryExit.value.value;
-  const models =
-    discoveredModels.length > 0
-      ? hermesModelsFromSettings(hermesSettings.customModels, discoveredModels)
-      : fallbackModels;
+  // A successful `hermes --version` probe proves the CLI is usable. Report
+  // readiness immediately, carrying the built-in `HERMES_BUILT_IN_MODELS`
+  // (the `hermes` model). The model picker only surfaces models from
+  // instances whose status is exactly `"ready"` (see
+  // `isProviderInstancePickerReady`), so readiness must come from the fast
+  // version probe — not from the slower ACP session discovery, which would
+  // otherwise leave the provider unselectable until a multi-second ACP
+  // startup completes. ACP-discovered models are a future enrichment; the
+  // built-in entry is always selectable.
+  const models = fallbackModels;
 
   return buildServerProvider({
     presentation: HERMES_PRESENTATION,
