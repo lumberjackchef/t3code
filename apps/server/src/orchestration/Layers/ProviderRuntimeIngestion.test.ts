@@ -1029,6 +1029,67 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("maps turn-less (idle, server-initiated) content delta/item completed into assistant messages", async () => {
+    // Hermes' post-turn report-back follow-ups stream while NO T3 turn is
+    // active: the adapter now passes these through with turnId undefined, and
+    // ingestion must project them as turn-less thread messages (same shape as
+    // client-submitted user messages), keyed by itemId.
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-idle-delta-1"),
+      provider: ProviderDriverKind.make("hermes"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: undefined,
+      itemId: asItemId("item-idle-1"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "report",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-idle-delta-2"),
+      provider: ProviderDriverKind.make("hermes"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: undefined,
+      itemId: asItemId("item-idle-1"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: " back",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-idle-completed"),
+      provider: ProviderDriverKind.make("hermes"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: undefined,
+      itemId: asItemId("item-idle-1"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-idle-1" && !message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-idle-1",
+    );
+    expect(message?.text).toBe("report back");
+    expect(message?.streaming).toBe(false);
+  });
+
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -153,7 +153,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const resolveNotificationTurnId = (ctx: HermesSessionContext): TurnId | undefined => ctx.activeTurnId;
+const resolveNotificationTurnId = (ctx: HermesSessionContext): TurnId | undefined =>
+  ctx.activeTurnId;
 
 const resolveCallbackTurnId = (ctx: HermesSessionContext): TurnId | undefined => ctx.activeTurnId;
 
@@ -217,7 +218,10 @@ export function hermesPromptSettlementBelongsToContext(input: {
   );
 }
 
-export function makeHermesAdapter(hermesSettings: HermesSettings, options?: HermesAdapterLiveOptions) {
+export function makeHermesAdapter(
+  hermesSettings: HermesSettings,
+  options?: HermesAdapterLiveOptions,
+) {
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("hermes");
     const fileSystem = yield* FileSystem.FileSystem;
@@ -609,95 +613,113 @@ export function makeHermesAdapter(hermesSettings: HermesSettings, options?: Herm
             // question list, then translate the user's answers back into an
             // `ElicitationResponse`. URL-mode elicitations are declined
             // (T3 has no shell for opening inline URLs mid-turn).
-            yield* acp.handleElicitation((
-              params,
-            ): Effect.Effect<
-              EffectAcpSchema.ElicitationResponse,
-              EffectAcpErrors.AcpError
-            > => {
-              return mapAcpCallbackFailure(
-                Effect.gen(function* () {
-                  if (params.mode !== "form") {
-                    return EffectAcpSchema.ElicitationResponse.make({ action: { action: "decline" } });
-                  }
-                  const schema = params.requestedSchema;
-                  const properties = Object.entries(schema.properties ?? {});
-                  const questionForProperty = (
-                    key: string,
-                    prop: EffectAcpSchema.ElicitationPropertySchema,
-                  ): { id: string; header: string; question: string; options: Array<{ label: string; description: string }>; multiSelect: boolean } => {
-                    const options = (prop.type === "string" && prop.enum
-                      ? prop.enum.map((o) => ({ label: o, description: o }))
-                      : prop.type === "array" && prop.items && "enum" in prop.items
-                        ? prop.items.enum.map((o) => ({ label: o, description: o }))
-                        : []
-                    );
-                    return {
-                      id: key,
-                      header: prop.title?.trim() || key,
-                      question: prop.description?.trim() || prop.title?.trim() || key,
-                      options,
-                      multiSelect: prop.type === "array",
+            yield* acp.handleElicitation(
+              (
+                params,
+              ): Effect.Effect<EffectAcpSchema.ElicitationResponse, EffectAcpErrors.AcpError> => {
+                return mapAcpCallbackFailure(
+                  Effect.gen(function* () {
+                    if (params.mode !== "form") {
+                      return EffectAcpSchema.ElicitationResponse.make({
+                        action: { action: "decline" },
+                      });
+                    }
+                    const schema = params.requestedSchema;
+                    const properties = Object.entries(schema.properties ?? {});
+                    const questionForProperty = (
+                      key: string,
+                      prop: EffectAcpSchema.ElicitationPropertySchema,
+                    ): {
+                      id: string;
+                      header: string;
+                      question: string;
+                      options: Array<{ label: string; description: string }>;
+                      multiSelect: boolean;
+                    } => {
+                      const options =
+                        prop.type === "string" && prop.enum
+                          ? prop.enum.map((o) => ({ label: o, description: o }))
+                          : prop.type === "array" && prop.items && "enum" in prop.items
+                            ? prop.items.enum.map((o) => ({ label: o, description: o }))
+                            : [];
+                      return {
+                        id: key,
+                        header: prop.title?.trim() || key,
+                        question: prop.description?.trim() || prop.title?.trim() || key,
+                        options,
+                        multiSelect: prop.type === "array",
+                      };
                     };
-                  };
-                  const questions = properties.map(([key, prop]) =>
-                    questionForProperty(key, prop),
-                  );
-                  const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
-                  const runtimeRequestId = RuntimeRequestId.make(requestId);
-                  const resolution = yield* Deferred.make<PendingUserInputResolution>();
-                  const turnId = resolveSessionCallbackTurnId(sessions, input.threadId);
-                  pendingUserInputs.set(requestId, { resolution });
-                  yield* offerRuntimeEvent({
-                    type: "user-input.requested",
-                    ...(yield* makeEventStamp()),
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                    turnId,
-                    requestId: runtimeRequestId,
-                    payload: {
-                      questions: questions.length > 0
-                        ? questions
-                        : [{ id: "answer", header: "Answer", question: schema.title || params.message, options: [], multiSelect: false }],
-                    },
-                    raw: {
-                      source: "acp.jsonrpc",
-                      method: "session/elicitation",
-                      payload: params,
-                    },
-                  });
-                  const resolved = yield* Deferred.await(resolution);
-                  pendingUserInputs.delete(requestId);
-                  const resolvedAnswers = resolved._tag === "answered" ? resolved.answers : {};
-                  yield* offerRuntimeEvent({
-                    type: "user-input.resolved",
-                    ...(yield* makeEventStamp()),
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                    turnId,
-                    requestId: runtimeRequestId,
-                    payload: { answers: resolvedAnswers },
-                    raw: {
-                      source: "acp.jsonrpc",
-                      method: "session/elicitation",
-                      payload: params,
-                    },
-                  });
-                  if (resolved._tag === "cancelled") {
-                    return EffectAcpSchema.ElicitationResponse.make({ action: { action: "cancel" } });
-                  }
-                  return EffectAcpSchema.ElicitationResponse.make({
-                    action: {
-                      action: "accept",
-                      content: resolvedAnswers as Record<
-                        string,
-                        EffectAcpSchema.ElicitationContentValue
-                      >,
-                    },
-                  });
-                }),
-              );
-            });
+                    const questions = properties.map(([key, prop]) =>
+                      questionForProperty(key, prop),
+                    );
+                    const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+                    const runtimeRequestId = RuntimeRequestId.make(requestId);
+                    const resolution = yield* Deferred.make<PendingUserInputResolution>();
+                    const turnId = resolveSessionCallbackTurnId(sessions, input.threadId);
+                    pendingUserInputs.set(requestId, { resolution });
+                    yield* offerRuntimeEvent({
+                      type: "user-input.requested",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId,
+                      requestId: runtimeRequestId,
+                      payload: {
+                        questions:
+                          questions.length > 0
+                            ? questions
+                            : [
+                                {
+                                  id: "answer",
+                                  header: "Answer",
+                                  question: schema.title || params.message,
+                                  options: [],
+                                  multiSelect: false,
+                                },
+                              ],
+                      },
+                      raw: {
+                        source: "acp.jsonrpc",
+                        method: "session/elicitation",
+                        payload: params,
+                      },
+                    });
+                    const resolved = yield* Deferred.await(resolution);
+                    pendingUserInputs.delete(requestId);
+                    const resolvedAnswers = resolved._tag === "answered" ? resolved.answers : {};
+                    yield* offerRuntimeEvent({
+                      type: "user-input.resolved",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId,
+                      requestId: runtimeRequestId,
+                      payload: { answers: resolvedAnswers },
+                      raw: {
+                        source: "acp.jsonrpc",
+                        method: "session/elicitation",
+                        payload: params,
+                      },
+                    });
+                    if (resolved._tag === "cancelled") {
+                      return EffectAcpSchema.ElicitationResponse.make({
+                        action: { action: "cancel" },
+                      });
+                    }
+                    return EffectAcpSchema.ElicitationResponse.make({
+                      action: {
+                        action: "accept",
+                        content: resolvedAnswers as Record<
+                          string,
+                          EffectAcpSchema.ElicitationContentValue
+                        >,
+                      },
+                    });
+                  }),
+                );
+              },
+            );
             yield* acp.handleRequestPermission((params) =>
               mapAcpCallbackFailure(
                 Effect.gen(function* () {
@@ -837,10 +859,25 @@ export function makeHermesAdapter(hermesSettings: HermesSettings, options?: Herm
 
                 const notificationTurnId = resolveNotificationTurnId(ctx);
                 if (
-                  notificationTurnId === undefined ||
+                  notificationTurnId !== undefined &&
                   ctx.interruptedTurnIds.has(notificationTurnId)
                 ) {
                   return;
+                }
+                if (notificationTurnId === undefined) {
+                  // Idle (server-initiated) content — e.g. Hermes' post-turn
+                  // report-back follow-up turns. Only assistant-text item
+                  // events pass through; the ingestion layer projects them as
+                  // turn-less thread messages (itemId-keyed, turnId null, same
+                  // shape as client-submitted user messages). Plan/tool-call
+                  // chrome needs an active turn and stays dropped.
+                  if (
+                    event._tag !== "AssistantItemStarted" &&
+                    event._tag !== "AssistantItemCompleted" &&
+                    event._tag !== "ContentDelta"
+                  ) {
+                    return;
+                  }
                 }
                 const stamp = yield* makeEventStamp();
 
