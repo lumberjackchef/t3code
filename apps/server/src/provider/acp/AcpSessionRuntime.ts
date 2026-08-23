@@ -47,6 +47,35 @@ export interface AcpSessionEventStreamBarrier {
 
 export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStreamBarrier;
 
+/**
+ * Extract the provider-reported live session id from a session setup result's
+ * `_meta.hermes.sessionProvenance.currentHermesSessionId` (a Hermes extension
+ * flagging compression-driven session rotation: the requested id can be a stale
+ * root of a compression chain, and the value reports the session that actually
+ * accepts new messages). Returns `undefined` when the meta is absent or the
+ * value is not a non-empty string so callers can safely no-op.
+ */
+export function getProvenanceLiveSessionId(
+  setupResult:
+    | EffectAcpSchema.LoadSessionResponse
+    | EffectAcpSchema.NewSessionResponse
+    | EffectAcpSchema.ResumeSessionResponse,
+): string | undefined {
+  const meta = (
+    setupResult as {
+      readonly _meta?: { readonly [x: string]: unknown } | null;
+    }
+  )._meta;
+  if (!meta || typeof meta !== "object") {
+    return undefined;
+  }
+  const hermesMeta = meta["hermes"] as
+    | { readonly sessionProvenance?: { readonly currentHermesSessionId?: unknown } }
+    | undefined;
+  const liveSessionId = hermesMeta?.sessionProvenance?.currentHermesSessionId;
+  return typeof liveSessionId === "string" && liveSessionId.length > 0 ? liveSessionId : undefined;
+}
+
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
 
@@ -630,6 +659,23 @@ export const make = (
 
           return loaded;
         }).pipe(Effect.ensuring(Ref.set(sessionLoadGateRef, Option.none())));
+
+        // After a successful session/load, the provider may report that the
+        // requested session id is a stale root of a compression chain (Hermes
+        // rotates its internal session id on every context compression; the
+        // client-held resume cursor can be many compressions behind). Adopt
+        // the provider-reported live head so the persisted resume cursor and
+        // the notification routing gate converge to the session that actually
+        // accepts messages. Hermes reports this under
+        // `_meta.hermes.sessionProvenance.currentHermesSessionId`.
+        const liveSessionId = getProvenanceLiveSessionId(sessionSetupResult);
+        if (typeof liveSessionId === "string" && liveSessionId && liveSessionId !== sessionId) {
+          yield* Effect.logInfo("session/load: adopting provider-reported live compression head", {
+            requestedSessionId: sessionId,
+            liveSessionId,
+          });
+          sessionId = liveSessionId;
+        }
       } else {
         const createPayload = {
           cwd: options.cwd,
