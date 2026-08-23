@@ -422,6 +422,23 @@ export const make = (
         ) {
           return;
         }
+        // Server-initiated (idle) content bursts — e.g. Hermes' post-turn
+        // report-back follow-ups — are not wrapped in a `prompt()` lifecycle,
+        // so their final assistant segment never gets closed by the prompt
+        // completion hooks below. Any non-content update arriving while no
+        // prompt is in flight marks the end of such a burst: close the active
+        // segment so the last message finalizes and projects. No-op when no
+        // segment is open (normal client flows close via prompt() anyway).
+        const promptInFlight = yield* Ref.get(activePromptFiberRef);
+        if (
+          Option.isNone(promptInFlight) &&
+          notification.update.sessionUpdate !== "agent_message_chunk"
+        ) {
+          yield* closeActiveAssistantSegment({
+            queue: eventQueue,
+            assistantSegmentRef,
+          });
+        }
         yield* handleSessionUpdate({
           queue: eventQueue,
           modeStateRef,
