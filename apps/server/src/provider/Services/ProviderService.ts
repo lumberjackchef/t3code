@@ -80,6 +80,13 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
+   * Reflect provider-side activity into the persisted binding's last-seen
+   * timestamp, without rewriting the row. The runtime-event ingestion path
+   * calls this so the session reaper never treats an emitting session as idle.
+   */
+  readonly touchSession: (threadId: ThreadId) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
    * List active provider sessions.
    *
    * Aggregates runtime session lists from all registered adapters.

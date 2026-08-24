@@ -150,6 +150,13 @@ describe("ProviderSessionReaper", () => {
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
+    readonly capabilitiesByInstance?: Record<
+      string,
+      {
+        readonly sessionModelSwitch: "in-session" | "unsupported";
+        readonly sessionIdleTimeoutMs?: number;
+      }
+    >;
   }) {
     const stoppedThreadIds = new Set<ThreadId>();
     const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(
@@ -168,8 +175,14 @@ describe("ProviderSessionReaper", () => {
       respondToRequest: () => unsupported(),
       respondToUserInput: () => unsupported(),
       stopSession,
+      touchSession: () => Effect.void,
       listSessions: () => Effect.succeed([]),
-      getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
+      getCapabilities: (instanceId) =>
+        Effect.succeed(
+          input.capabilitiesByInstance?.[String(instanceId)] ?? {
+            sessionModelSwitch: "in-session",
+          },
+        ),
       getInstanceInfo: (instanceId) => {
         const driverKind = ProviderDriverKind.make(String(instanceId));
         return Effect.succeed({
@@ -634,5 +647,95 @@ describe("ProviderSessionReaper", () => {
       defectThreadId,
       reapedThreadId,
     ]);
+  });
+
+  it("applies the provider-declared idle threshold per driver", async () => {
+    const hermesThreadId = ThreadId.make("thread-reaper-hermes-long-threshold");
+    const codexThreadId = ThreadId.make("thread-reaper-codex-default");
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: hermesThreadId,
+          session: {
+            threadId: hermesThreadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+        {
+          id: codexThreadId,
+          session: {
+            threadId: codexThreadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+      capabilitiesByInstance: {
+        // Full-agent ACP providers declare a long idle threshold; the idle
+        // duration below is far past the test's 1s default but short of 4h.
+        hermes: {
+          sessionModelSwitch: "in-session",
+          sessionIdleTimeoutMs: 4 * 60 * 60 * 1000,
+        },
+      },
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+    // Idle for ~1h: past the test's 1s default, but inside a 4h ACP window.
+    const hourAgoMs = (await Effect.runPromise(Clock.currentTimeMillis)) - 60 * 60 * 1000;
+    const hourAgoIso = new Date(hourAgoMs).toISOString();
+
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: hermesThreadId,
+        providerName: "hermes",
+        providerInstanceId: null,
+        adapterKey: "hermes",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: hourAgoIso,
+        resumeCursor: {
+          opaque: "resume-hermes-long",
+        },
+        runtimePayload: null,
+      }),
+    );
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId: codexThreadId,
+        providerName: "codex",
+        providerInstanceId: null,
+        adapterKey: "codex",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: hourAgoIso,
+        resumeCursor: {
+          opaque: "resume-codex-default",
+        },
+        runtimePayload: null,
+      }),
+    );
+
+    await startReaper();
+
+    // Only the default-threshold (codex) session is reaped; the Hermes session
+    // stays within its provider-declared 4h idle window.
+    await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId: codexThreadId });
+    const hermesRemaining = await runtime!.runPromise(
+      repository.getByThreadId({ threadId: hermesThreadId }),
+    );
+    expect(Option.isSome(hermesRemaining)).toBe(true);
   });
 });

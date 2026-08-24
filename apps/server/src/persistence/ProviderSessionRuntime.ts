@@ -58,6 +58,12 @@ export type GetProviderSessionRuntimeInput = typeof GetProviderSessionRuntimeInp
 export const DeleteProviderSessionRuntimeInput = Schema.Struct({ threadId: ThreadId });
 export type DeleteProviderSessionRuntimeInput = typeof DeleteProviderSessionRuntimeInput.Type;
 
+export const TouchProviderSessionRuntimeInput = Schema.Struct({
+  threadId: ThreadId,
+  lastSeenAt: IsoDateTime,
+});
+export type TouchProviderSessionRuntimeInput = typeof TouchProviderSessionRuntimeInput.Type;
+
 /**
  * ProviderSessionRuntimeRepository - Service tag for provider runtime persistence.
  */
@@ -98,6 +104,15 @@ export class ProviderSessionRuntimeRepository extends Context.Service<
      */
     readonly deleteByThreadId: (
       input: DeleteProviderSessionRuntimeInput,
+    ) => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>;
+
+    /**
+     * Bump only the last-seen timestamp of a provider runtime row. Used by
+     * the runtime-event ingestion path so the session reaper never treats an
+     * emitting session as idle, without rewriting the full row.
+     */
+    readonly touchLastSeenAt: (
+      input: TouchProviderSessionRuntimeInput,
     ) => Effect.Effect<void, ProviderSessionRuntimeRepositoryError>;
   }
 >()("t3/persistence/ProviderSessionRuntime/ProviderSessionRuntimeRepository") {}
@@ -235,6 +250,16 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  const touchLastSeenAtRow = SqlSchema.void({
+    Request: TouchProviderSessionRuntimeInput,
+    execute: ({ threadId, lastSeenAt }) =>
+      sql`
+        UPDATE provider_session_runtime
+        SET last_seen_at = ${lastSeenAt}
+        WHERE thread_id = ${threadId}
+      `,
+  });
+
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime) =>
     upsertRuntimeRow(runtime).pipe(
       Effect.mapError(
@@ -322,11 +347,24 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const touchLastSeenAt: ProviderSessionRuntimeRepository["Service"]["touchLastSeenAt"] = (input) =>
+    touchLastSeenAtRow(input).pipe(
+      Effect.mapError(
+        (cause) =>
+          new PersistenceSqlError({
+            operation: "ProviderSessionRuntimeRepository.touchLastSeenAt:query",
+            correlation: { threadId: input.threadId },
+            cause,
+          }),
+      ),
+    );
+
   return {
     upsert,
     getByThreadId,
     list,
     deleteByThreadId,
+    touchLastSeenAt,
   } satisfies ProviderSessionRuntimeRepository["Service"];
 });
 

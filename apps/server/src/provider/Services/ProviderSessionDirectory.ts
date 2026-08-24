@@ -45,6 +45,15 @@ export interface ProviderSessionDirectoryShape {
     binding: ProviderRuntimeBinding,
   ) => Effect.Effect<void, ProviderSessionDirectoryWriteError>;
 
+  /**
+   * Bump the binding's last-seen timestamp without rewriting the row. Used by
+   * the runtime-event ingestion path so the session reaper never treats an
+   * emitting session as idle.
+   */
+  readonly touch: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, ProviderSessionDirectoryPersistenceError>;
+
   readonly getProvider: (
     threadId: ThreadId,
   ) => Effect.Effect<ProviderDriverKind, ProviderSessionDirectoryReadError>;

@@ -268,4 +268,36 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
 
       NodeFS.rmSync(tempDir, { recursive: true, force: true });
     }));
+
+  it("touches the binding last-seen without rewriting the row", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      const threadId = ThreadId.make("thread-touch");
+
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        status: "running",
+        runtimePayload: { cwd: "/tmp/touch-project" },
+      });
+
+      // Pin an old last-seen so the bump is observable.
+      yield* runtimeRepository.touchLastSeenAt({
+        threadId,
+        lastSeenAt: "2020-01-01T00:00:00.000Z",
+      });
+      yield* directory.touch(threadId);
+
+      const runtime = yield* runtimeRepository.getByThreadId({ threadId });
+      assert.equal(Option.isSome(runtime), true);
+      if (Option.isSome(runtime)) {
+        assert.notEqual(runtime.value.lastSeenAt, "2020-01-01T00:00:00.000Z");
+        // A touch must not rewrite any other field.
+        assert.equal(runtime.value.status, "running");
+        assert.equal(runtime.value.providerName, "codex");
+        assert.deepEqual(runtime.value.runtimePayload, { cwd: "/tmp/touch-project" });
+      }
+    }));
 });

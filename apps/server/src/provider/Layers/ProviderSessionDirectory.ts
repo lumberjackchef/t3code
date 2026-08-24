@@ -170,6 +170,16 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       Effect.map((rows) => rows.map((row) => row.threadId)),
     );
 
+  const touch: ProviderSessionDirectoryShape["touch"] = (threadId) =>
+    Effect.gen(function* () {
+      const lastSeenAt = DateTime.formatIso(yield* DateTime.now);
+      yield* repository
+        .touchLastSeenAt({ threadId, lastSeenAt })
+        .pipe(
+          Effect.mapError(toPersistenceError("ProviderSessionDirectory.touch:touchLastSeenAt")),
+        );
+    });
+
   const listBindings: ProviderSessionDirectoryShape["listBindings"] = () =>
     repository.list().pipe(
       Effect.mapError(toPersistenceError("ProviderSessionDirectory.listBindings:list")),
@@ -184,6 +194,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
 
   return {
     upsert,
+    touch,
     getProvider,
     getBinding,
     listThreadIds,

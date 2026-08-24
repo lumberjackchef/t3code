@@ -983,6 +983,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const touchSession: ProviderServiceMethod<"touchSession"> = (threadId) =>
+    directory.touch(threadId);
+
   const listSessions: ProviderServiceMethod<"listSessions"> = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
@@ -1184,6 +1187,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     respondToRequest,
     respondToUserInput,
     stopSession,
+    touchSession,
     listSessions,
     getCapabilities,
     getInstanceInfo,

@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -2059,11 +2060,49 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processInputSafely);
 
+  // Sessions that emit canonical runtime events are alive by definition. Bump
+  // the persisted binding's last-seen so the session reaper never reaps a
+  // session that is streaming, even when no T3 turn is active (Hermes idle
+  // report-backs stream with turnId undefined). Throttled per thread so
+  // high-frequency event streams (content deltas) do not become a write
+  // amplifier; the map is bounded by sweeping stale entries on each touch.
+  const SESSION_LAST_SEEN_TOUCH_INTERVAL_MS = 30_000;
+  const lastSessionTouchAtMs = new Map<string, number>();
+
+  const touchSessionLastSeen = (threadId: ThreadId): Effect.Effect<void, never> =>
+    Clock.currentTimeMillis.pipe(
+      Effect.flatMap((nowMs) => {
+        const previousMs = lastSessionTouchAtMs.get(threadId);
+        if (previousMs !== undefined && nowMs - previousMs < SESSION_LAST_SEEN_TOUCH_INTERVAL_MS) {
+          return Effect.void;
+        }
+        lastSessionTouchAtMs.set(threadId, nowMs);
+        if (lastSessionTouchAtMs.size > 512) {
+          for (const [key, touchedAtMs] of lastSessionTouchAtMs) {
+            if (nowMs - touchedAtMs > SESSION_LAST_SEEN_TOUCH_INTERVAL_MS * 2) {
+              lastSessionTouchAtMs.delete(key);
+            }
+          }
+        }
+        return providerService.touchSession(threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logDebug("provider runtime ingestion failed to touch session last-seen", {
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+          Effect.asVoid,
+        );
+      }),
+    );
+
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(providerService.streamEvents, (event) =>
-          worker.enqueue({ source: "runtime", event }),
+          touchSessionLastSeen(event.threadId).pipe(
+            Effect.flatMap(() => worker.enqueue({ source: "runtime", event })),
+          ),
         ),
       );
       yield* forkParked(

@@ -32,7 +32,7 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { it as effectIt } from "@effect/vitest";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -100,6 +100,11 @@ function isLegacyTurnCompletedEvent(
 function createProviderServiceHarness() {
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const runtimeSessions: ProviderSession[] = [];
+  const touchSession = vi.fn<ProviderServiceShape["touchSession"]>((threadId) => {
+    touchSessionCalls.push(threadId);
+    return Effect.void;
+  });
+  const touchSessionCalls: Array<ThreadId> = [];
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
@@ -109,6 +114,7 @@ function createProviderServiceHarness() {
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
+    touchSession,
     listSessions: () => Effect.succeed([...runtimeSessions]),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     getInstanceInfo: (instanceId) => {
@@ -162,6 +168,7 @@ function createProviderServiceHarness() {
     service,
     emit,
     setSession,
+    touchSessionCalls,
   };
 }
 
@@ -322,9 +329,39 @@ describe("ProviderRuntimeIngestion", () => {
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       emit: provider.emit,
       setProviderSession: provider.setSession,
+      touchSessionCalls: provider.touchSessionCalls,
       drain,
     };
   }
+
+  it("touches the provider session last-seen when runtime events stream", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-touch-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      turnId: asTurnId("turn-1"),
+      itemId: asItemId("item-touch"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "hello",
+      },
+    });
+
+    // The ingestion pump bumps the persisted binding's last-seen for every
+    // canonical runtime event so the session reaper never reaps an emitting
+    // session (throttled per thread, but the first event always touches).
+    await waitForThread(
+      harness.readModel,
+      () => harness.touchSessionCalls.length >= 1,
+      2_000,
+      asThreadId("thread-1"),
+    );
+    expect(harness.touchSessionCalls).toContain(ThreadId.make("thread-1"));
+  });
 
   it("maps turn started/completed events into thread session updates", async () => {
     const harness = await createHarness();

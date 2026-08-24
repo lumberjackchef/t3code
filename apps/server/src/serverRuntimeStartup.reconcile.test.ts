@@ -51,6 +51,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     respondToRequest: () => Effect.die("unused"),
     respondToUserInput: () => Effect.die("unused"),
     stopSession: () => Effect.die("unused"),
+    touchSession: () => Effect.void,
     listSessions: () => Effect.succeed(liveThreadIds.map((threadId) => ({ threadId }) as never)),
     getCapabilities: () => Effect.die("unused"),
     getInstanceInfo: () => Effect.die("unused"),
@@ -129,6 +130,7 @@ it.effect("reconciles multiple active and archived orphans but skips live sessio
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.die("unused"),
+      touch: () => Effect.die("unused"),
     },
     dispatch: (command) =>
       Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: dispatched.length })),
@@ -198,6 +200,7 @@ it.effect(
         getProvider: () => Effect.die("unused"),
         listThreadIds: () => Effect.die("unused"),
         listBindings: () => Effect.die("unused"),
+        touch: () => Effect.die("unused"),
       },
       dispatch: (command) =>
         Effect.sync(() => dispatched.push(command)).pipe(
@@ -235,6 +238,7 @@ it.effect("retries failed projections and continues after a persistent failure",
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.die("unused"),
+      touch: () => Effect.die("unused"),
     },
     dispatch: (command) => {
       if (command.type !== "thread.session.set") {
@@ -283,6 +287,7 @@ it.effect("does not fail startup when the live provider session inventory cannot
       getProvider: () => Effect.die("unused"),
       listThreadIds: () => Effect.die("unused"),
       listBindings: () => Effect.die("unused"),
+      touch: () => Effect.die("unused"),
     }),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
       readEvents: () => Stream.empty,
