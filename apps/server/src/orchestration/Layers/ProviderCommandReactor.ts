@@ -1168,9 +1168,26 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    // sendTurn normally runs on the session ensureSessionForThread just bound,
+    // but the session can vanish in the window between that check and the
+    // adapter dispatching the turn (e.g. a stop that raced the turn start, or
+    // the provider child dying while the turn was queued). ProviderAdapter
+    // adapters perform their session lookup as the first step of sendTurn, so
+    // this failure guarantees nothing was submitted to the agent — re-ensure a
+    // fresh session and retry the send exactly once instead of surfacing a raw
+    // "unknown adapter thread" error to the thread.
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.catchTag("ProviderAdapterSessionNotFoundError", () =>
+        ensureSessionForThread(event.payload.threadId, event.payload.createdAt, {
+          pendingTurnStart: true,
+          ...(event.payload.modelSelection !== undefined
+            ? { modelSelection: event.payload.modelSelection }
+            : {}),
+        }).pipe(Effect.flatMap(() => providerService.sendTurn(sendTurnRequest.value))),
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

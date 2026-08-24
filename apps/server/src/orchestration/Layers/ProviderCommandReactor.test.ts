@@ -34,7 +34,10 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterRequestError,
+  ProviderAdapterSessionNotFoundError,
+} from "../../provider/Errors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -229,7 +232,7 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
+    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((_: unknown) =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
@@ -550,6 +553,52 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("recovers a turn start when the adapter session vanishes between ensure and sendTurn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+
+    // Model the session dying in the window between ensureSessionForThread and
+    // the adapter dispatching the turn: the first sendTurn fails with
+    // ProviderAdapterSessionNotFoundError and drops the session from the
+    // provider registry (mirrors stopSessionInternal deleting the adapter ctx).
+    harness.sendTurn.mockImplementationOnce((_) =>
+      harness
+        .stopSession({ threadId })
+        .pipe(
+          Effect.flatMap(() =>
+            Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: "codex", threadId })),
+          ),
+        ),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-session-race"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-session-race"),
+          role: "user",
+          text: "continue after race",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    // First attempt fails with session-not-found; the reactor re-ensures a
+    // fresh session and retries the send exactly once.
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("starting");
+    expect(thread?.session?.lastError).toBeNull();
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
