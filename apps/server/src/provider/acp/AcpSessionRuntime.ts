@@ -5,6 +5,7 @@ import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -78,6 +79,7 @@ export function getProvenanceLiveSessionId(
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
+const defaultPromptInactivityTimeout = Duration.minutes(20);
 
 export interface AcpSpawnInput {
   readonly command: string;
@@ -92,6 +94,16 @@ export interface AcpSessionRuntimeOptions {
   readonly resumeSessionId?: string;
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /**
+   * Fails an in-flight `session/prompt` when the agent produces no runtime
+   * events for this long while no tool call is in flight and no user
+   * interaction (permission / elicitation) is pending. Protects clients
+   * from turns that hang forever on a stalled-but-alive agent child (e.g. a
+   * hung LLM provider call). Defaults to 20 minutes; a completed or failed
+   * prompt never triggers it, and the session/child stay alive afterwards.
+   * @see https://agentclientprotocol.com/protocol/schema#session/prompt
+   */
+  readonly promptInactivityTimeout?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   readonly clientInfo: {
     readonly name: string;
@@ -326,6 +338,20 @@ export const make = (
       Option.Option<Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>>
     >(Option.none());
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
+    // Baseline (epoch millis) of the last agent activity while a prompt is in
+    // flight. Reset at prompt start, bumped on every processed session/update.
+    const lastPromptActivityAtRef = yield* Ref.make(0);
+    // True while the client is awaiting a user response to a
+    // session/request_permission or session/elicitation request. Such waits
+    // are legitimate silence and exempt the prompt inactivity watchdog.
+    const promptInteractionPendingRef = yield* Ref.make(false);
+    const promptInactivityTimeoutMillis = Duration.toMillis(
+      Duration.fromInputUnsafe(options.promptInactivityTimeout ?? defaultPromptInactivityTimeout),
+    );
+    const promptInactivityPollIntervalMillis = Math.min(
+      Math.max(Math.floor(promptInactivityTimeoutMillis / 10), 10),
+      1000,
+    );
 
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
@@ -422,6 +448,10 @@ export const make = (
         ) {
           return;
         }
+        // Any processed update for the root session is agent activity: reset
+        // the prompt inactivity baseline so streaming turns never time out.
+        const activityAtMillis = yield* Clock.currentTimeMillis;
+        yield* Ref.set(lastPromptActivityAtRef, activityAtMillis);
         // Server-initiated (idle) content bursts — e.g. Hermes' post-turn
         // report-back follow-ups — are not wrapped in a `prompt()` lifecycle,
         // so their final assistant segment never gets closed by the prompt
@@ -752,8 +782,10 @@ export const make = (
     });
 
     return {
-      handleRequestPermission: acp.handleRequestPermission,
-      handleElicitation: acp.handleElicitation,
+      handleRequestPermission: (handler) =>
+        acp.handleRequestPermission(trackPromptInteraction(handler, promptInteractionPendingRef)),
+      handleElicitation: (handler) =>
+        acp.handleElicitation(trackPromptInteraction(handler, promptInteractionPendingRef)),
       handleReadTextFile: acp.handleReadTextFile,
       handleWriteTextFile: acp.handleWriteTextFile,
       handleCreateTerminal: acp.handleCreateTerminal,
@@ -794,13 +826,67 @@ export const make = (
             const cancelledResponse = {
               stopReason: "cancelled",
             } satisfies EffectAcpSchema.PromptResponse;
+            // The prompt settles through a deferred so the inactivity
+            // watchdog can fail it without disturbing the in-flight RPC
+            // fiber (which must stay interruptible for session/cancel).
+            const promptDeferred = yield* Deferred.make<
+              EffectAcpSchema.PromptResponse,
+              EffectAcpErrors.AcpError
+            >();
+            const promptStartAtMillis = yield* Clock.currentTimeMillis;
+            yield* Ref.set(lastPromptActivityAtRef, promptStartAtMillis);
+            // The RPC fiber settles the deferred on every terminal state:
+            // success (tap), failure (tapErrorCause), and interruption
+            // (onExit, e.g. session scope teardown or session/cancel). This
+            // guarantees prompt() never hangs on a settlement nobody observed.
             const promptRpcFiber = yield* runLoggedRequest(
               "session/prompt",
               requestPayload,
               acp.agent.prompt(requestPayload),
-            ).pipe(Effect.forkIn(runtimeScope));
+            ).pipe(
+              Effect.tap((response) =>
+                Deferred.succeed(promptDeferred, response).pipe(Effect.ignore),
+              ),
+              Effect.tapCause((cause) =>
+                Deferred.failCause(promptDeferred, cause).pipe(Effect.ignore),
+              ),
+              Effect.onExit((exit) =>
+                Exit.match(exit, {
+                  onSuccess: () => Effect.void,
+                  onFailure: (cause) =>
+                    Deferred.failCause(promptDeferred, cause).pipe(Effect.ignore),
+                }),
+              ),
+              Effect.forkIn(runtimeScope),
+            );
+            const inactivityWatchdogFiber = yield* buildPromptInactivityWatchdog({
+              timeoutMillis: promptInactivityTimeoutMillis,
+              pollIntervalMillis: promptInactivityPollIntervalMillis,
+              lastPromptActivityAtRef,
+              toolCallsRef,
+              promptInteractionPendingRef,
+              onIdle: Effect.gen(function* () {
+                const idleError = new EffectAcpErrors.AcpTransportError({
+                  operation: "call-rpc",
+                  method: "session/prompt",
+                  detail:
+                    `ACP session inactivity timeout: no agent events for ${Math.round(
+                      promptInactivityTimeoutMillis / 60000,
+                    )} min with no in-flight tool or pending user interaction; ` +
+                    "failing the stalled prompt to avoid an unbounded turn",
+                  cause: undefined,
+                });
+                yield* logRequest({
+                  method: "session/prompt",
+                  payload: requestPayload,
+                  status: "failed",
+                  cause: Cause.fail(idleError),
+                });
+                yield* Deferred.fail(promptDeferred, idleError);
+              }),
+            }).pipe(Effect.forkIn(runtimeScope));
             yield* Ref.set(activePromptFiberRef, Option.some(promptRpcFiber));
-            return yield* Fiber.join(promptRpcFiber).pipe(
+            return yield* Deferred.await(promptDeferred).pipe(
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)
                   ? Effect.succeed(cancelledResponse)
@@ -809,6 +895,7 @@ export const make = (
               Effect.ensuring(
                 Effect.gen(function* () {
                   yield* Fiber.interrupt(promptRpcFiber).pipe(Effect.ignore);
+                  yield* Fiber.interrupt(inactivityWatchdogFiber).pipe(Effect.ignore);
                   yield* Ref.set(activePromptFiberRef, Option.none());
                 }),
               ),
@@ -1066,3 +1153,64 @@ const closeActiveAssistantSegment = ({
       } satisfies AcpAssistantSegmentState,
     ] as const;
   }).pipe(Effect.flatMap((event) => (event ? Queue.offer(queue, event) : Effect.void)));
+
+/**
+ * Marks the given agent-to-client request handler as an active user
+ * interaction: the pending flag is raised before the handler runs and
+ * cleared when it settles. While the flag is set, the prompt inactivity
+ * watchdog treats silence as legitimate (a human is reviewing a permission
+ * request or answering an elicitation), so a slow user never trips it.
+ */
+const trackPromptInteraction =
+  <A, B, E, R>(
+    handler: (request: A) => Effect.Effect<B, E, R>,
+    pendingRef: Ref.Ref<boolean>,
+  ): ((request: A) => Effect.Effect<B, E, R>) =>
+  (request) =>
+    Effect.gen(function* () {
+      yield* Ref.set(pendingRef, true);
+      return yield* handler(request);
+    }).pipe(Effect.ensuring(Ref.set(pendingRef, false)));
+
+/**
+ * Fails the in-flight prompt when the agent stays silent (no processed
+ * session/update, no in-flight tool call, no pending user interaction) for
+ * `timeoutMillis`. Polls on an interval bounded to [10ms, 1s] so small
+ * test timeouts stay precise and the 20-minute default stays cheap.
+ */
+const buildPromptInactivityWatchdog = (params: {
+  readonly timeoutMillis: number;
+  readonly pollIntervalMillis: number;
+  readonly lastPromptActivityAtRef: Ref.Ref<number>;
+  readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
+  readonly promptInteractionPendingRef: Ref.Ref<boolean>;
+  readonly onIdle: Effect.Effect<void, never>;
+}): Effect.Effect<void, never> => {
+  const loop: Effect.Effect<void, never> = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const lastActivity = yield* Ref.get(params.lastPromptActivityAtRef);
+    const inFlightTools = yield* Ref.get(params.toolCallsRef).pipe(
+      Effect.map((tools) => tools.size > 0),
+    );
+    const interactionPending = yield* Ref.get(params.promptInteractionPendingRef);
+    const idleForMillis = now - lastActivity;
+    if (idleForMillis >= params.timeoutMillis) {
+      if (inFlightTools || interactionPending) {
+        // Legitimate silence: restart the idle baseline so elapsed tool or
+        // approval time never counts toward the timeout.
+        yield* Ref.set(params.lastPromptActivityAtRef, now);
+        yield* Effect.sleep(
+          Duration.millis(Math.max(params.timeoutMillis, params.pollIntervalMillis)),
+        );
+        return yield* loop;
+      }
+      yield* params.onIdle;
+      return;
+    }
+    yield* Effect.sleep(
+      Duration.millis(Math.max(params.timeoutMillis - idleForMillis, params.pollIntervalMillis)),
+    );
+    return yield* loop;
+  });
+  return loop;
+};

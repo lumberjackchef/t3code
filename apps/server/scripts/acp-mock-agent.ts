@@ -36,6 +36,8 @@ const emitStaleXAiPromptCompleteBeforeSecondHang =
 const emitOverlappingXAiPromptCompleteOutOfOrder =
   process.env.T3_ACP_EMIT_OVERLAPPING_XAI_PROMPT_COMPLETE_OUT_OF_ORDER === "1";
 const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
+const streamChunkCount = Number(process.env.T3_ACP_STREAM_CHUNK_COUNT ?? "0");
+const streamChunkIntervalMs = Number(process.env.T3_ACP_STREAM_CHUNK_INTERVAL_MS ?? "100");
 const failSetConfigOption = process.env.T3_ACP_FAIL_SET_CONFIG_OPTION === "1";
 const exitOnSetConfigOption = process.env.T3_ACP_EXIT_ON_SET_CONFIG_OPTION === "1";
 const promptResponseText = process.env.T3_ACP_PROMPT_RESPONSE_TEXT;
@@ -520,6 +522,22 @@ const program = Effect.gen(function* () {
 
       if (hangPromptForever || (hangFirstPromptForever && promptCount === 1)) {
         return yield* Effect.never;
+      }
+
+      if (streamChunkCount > 0) {
+        for (let i = 0; i < streamChunkCount; i++) {
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `chunk ${i} ` },
+            },
+          });
+          if (i < streamChunkCount - 1) {
+            yield* Effect.sleep(`${streamChunkIntervalMs} millis`);
+          }
+        }
+        return { stopReason: "end_turn" };
       }
 
       if (emitXAiPromptCompleteThenHang) {

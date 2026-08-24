@@ -14,6 +14,9 @@ import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import * as Deferred from "effect/Deferred";
+import type * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -654,4 +657,139 @@ describe("AcpSessionRuntime", () => {
       Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
     );
   });
+
+  it.effect("fails a prompt that goes silent past the prompt inactivity timeout", () => {
+    const requestEvents: Array<AcpSessionRuntime.AcpSessionRequestLogEvent> = [];
+    return Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const error = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "hang" }],
+        })
+        .pipe(Effect.flip);
+      expect(error._tag).toBe("AcpTransportError");
+      if (error._tag === "AcpTransportError") {
+        expect(error.detail ?? "").toContain("inactivity");
+      }
+      // The watchdog surfaces the stall through the request log so the
+      // provider event log shows a session/prompt failure, like a transport
+      // error would, instead of a silent hang.
+      expect(
+        requestEvents.some(
+          (event) => event.method === "session/prompt" && event.status === "failed",
+        ),
+      ).toBe(true);
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_HANG_PROMPT_FOREVER: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          promptInactivityTimeout: "200 millis",
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              requestEvents.push(event);
+            }),
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+      TestClock.withLive,
+    );
+  });
+
+  it.effect("keeps a streaming prompt alive past the prompt inactivity timeout", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      // The mock streams 12 chunks at a 30ms cadence (~360ms total) while
+      // the inactivity timeout is 300ms: every chunk resets the baseline, so
+      // the prompt must complete normally instead of being reaped as idle.
+      const promptResult = yield* runtime.prompt({
+        prompt: [{ type: "text", text: "stream" }],
+      });
+      expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_STREAM_CHUNK_COUNT: "12",
+              T3_ACP_STREAM_CHUNK_INTERVAL_MS: "30",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          promptInactivityTimeout: "300 millis",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+      TestClock.withLive,
+    ),
+  );
+
+  it.effect("does not time out a prompt while awaiting user permission", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      yield* runtime.start();
+
+      const permissionDeferred = yield* Deferred.make<
+        EffectAcpSchema.RequestPermissionResponse,
+        EffectAcpErrors.AcpError
+      >();
+      yield* runtime.handleRequestPermission(() => Deferred.await(permissionDeferred));
+
+      const promptFiber = yield* runtime
+        .prompt({
+          prompt: [{ type: "text", text: "tool" }],
+        })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      // The agent emitted a tool call and asked for permission; while the
+      // human response is pending the prompt must survive well past the
+      // 200ms inactivity timeout.
+      yield* Effect.sleep("600 millis");
+      const stillRunning = yield* Fiber.join(promptFiber).pipe(Effect.timeoutOption("100 millis"));
+      expect(Option.isNone(stillRunning)).toBe(true);
+
+      yield* Deferred.succeed(permissionDeferred, {
+        outcome: { outcome: "selected", optionId: "allow-once" },
+      });
+      const promptResult = yield* Fiber.join(promptFiber);
+      expect(promptResult).toMatchObject({ stopReason: "end_turn" });
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_EMIT_TOOL_CALLS: "1",
+            },
+          },
+          cwd: process.cwd(),
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+          promptInactivityTimeout: "200 millis",
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
+      TestClock.withLive,
+    ),
+  );
 });
