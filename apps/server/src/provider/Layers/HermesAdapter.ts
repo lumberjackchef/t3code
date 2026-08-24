@@ -41,7 +41,10 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
-import { mapAcpToAdapterError } from "../acp/AcpAdapterSupport.ts";
+import {
+  DEFAULT_ACP_AGENT_SESSION_IDLE_TIMEOUT_MS,
+  mapAcpToAdapterError,
+} from "../acp/AcpAdapterSupport.ts";
 import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
@@ -1524,7 +1527,10 @@ export function makeHermesAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        sessionIdleTimeoutMs: DEFAULT_ACP_AGENT_SESSION_IDLE_TIMEOUT_MS,
+      },
       startSession,
       sendTurn,
       interruptTurn,

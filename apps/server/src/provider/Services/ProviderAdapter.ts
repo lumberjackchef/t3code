@@ -30,6 +30,14 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * Idle threshold the session reaper applies to this provider's sessions, in
+   * milliseconds. When omitted, the reaper falls back to its default (30 min).
+   * Full-agent ACP providers (Hermes, Grok) keep long-lived background work in
+   * the child process (subagent fleets, watch loops, queued completions), so
+   * they declare a longer threshold; cheap CLI providers stay at the default.
+   */
+  readonly sessionIdleTimeoutMs?: number;
 }
 
 export interface ProviderThreadTurnSnapshot {

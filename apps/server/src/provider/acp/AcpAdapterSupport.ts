@@ -14,6 +14,14 @@ import {
 const isAcpProcessExitedError = Schema.is(EffectAcpErrors.AcpProcessExitedError);
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
+/**
+ * Reaper idle threshold for full-agent ACP providers (Hermes, Grok). Their
+ * sessions ARE the agent process and keep background state alive (subagent
+ * fleets, watch loops, queued post-turn completions), so the session reaper
+ * must not treat a silent-but-alive session as abandoned after 30 minutes.
+ */
+export const DEFAULT_ACP_AGENT_SESSION_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+
 export function mapAcpToAdapterError(
   provider: ProviderDriverKind,
   threadId: ThreadId,

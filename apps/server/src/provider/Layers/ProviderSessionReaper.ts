@@ -6,7 +6,10 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
+import {
+  ProviderSessionDirectory,
+  type ProviderRuntimeBindingWithMetadata,
+} from "../Services/ProviderSessionDirectory.ts";
 import {
   ProviderSessionReaper,
   type ProviderSessionReaperShape,
@@ -39,6 +42,23 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
       const now = yield* Clock.currentTimeMillis;
       let reapedCount = 0;
 
+      // Providers declare their own idle threshold through adapter
+      // capabilities (e.g. Hermes/Grok keep long-lived background work in the
+      // child process and use 4h); cheap CLI providers fall back to the
+      // default. This never throws: unknown/disabled instances degrade to the
+      // default threshold.
+      const resolveEffectiveIdleThresholdMs = (
+        binding: ProviderRuntimeBindingWithMetadata,
+      ): Effect.Effect<number, never> => {
+        if (binding.providerInstanceId === undefined) {
+          return Effect.succeed(inactivityThresholdMs);
+        }
+        return providerService.getCapabilities(binding.providerInstanceId).pipe(
+          Effect.map((capabilities) => capabilities.sessionIdleTimeoutMs ?? inactivityThresholdMs),
+          Effect.catch(() => Effect.succeed(inactivityThresholdMs)),
+        );
+      };
+
       for (const binding of bindings) {
         if (binding.status === "stopped") {
           continue;
@@ -55,7 +75,8 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
         }
 
         const idleDurationMs = now - lastSeenMs;
-        if (idleDurationMs < inactivityThresholdMs) {
+        const effectiveIdleThresholdMs = yield* resolveEffectiveIdleThresholdMs(binding);
+        if (idleDurationMs < effectiveIdleThresholdMs) {
           continue;
         }
 
@@ -90,6 +111,7 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
               threadId: binding.threadId,
               provider: binding.provider,
               idleDurationMs,
+              effectiveIdleThresholdMs,
               reason: "inactivity_threshold",
             }),
           ),
